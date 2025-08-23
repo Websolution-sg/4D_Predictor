@@ -1,0 +1,220 @@
+name: Auto Update TOTO Result
+
+on:
+  schedule:
+    - cron: '0 1 * * 1,4'  # Every Monday and Thursday at 1:00am UTC
+  workflow_dispatch:        # Also allow manual trigger
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write  # Allow the workflow to write to the repository
+
+    steps:
+      # ✅ STEP 1: Checkout your repo so the script & CSV are accessible
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0  # Fetch full history to avoid shallow repository issues
+
+      # ✅ STEP 2: Setup Node.js environment
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      # ✅ STEP 3: Install dependencies (robust approach)
+      - name: Install dependencies
+        run: |
+          echo "� Running robust dependency installation..."
+          
+          # Method 1: Try the fix script
+          if [ -f fix-dependencies.cjs ]; then
+            echo "🎯 Using dependency fixer script..."
+            if node fix-dependencies.cjs; then
+              echo "✅ Dependency fixer succeeded"
+            else
+              echo "⚠️ Dependency fixer failed, trying manual approach..."
+            fi
+          fi
+          
+          # Method 2: Fallback manual installation
+          echo "🔄 Verifying installation..."
+          if ! node -e "require('node-fetch'); require('cheerio')" 2>/dev/null; then
+            echo "� Installing critical dependencies manually..."
+            npm install node-fetch@2.7.0 cheerio@1.0.0-rc.12 --no-optional --no-audit --force
+          fi
+          
+          # Final verification
+          echo "🧪 Final verification..."
+          node -e "
+            try {
+              const fetch = require('node-fetch');
+              const cheerio = require('cheerio');
+              console.log('✅ node-fetch:', typeof fetch === 'function' ? 'OK' : 'ERROR');
+              console.log('✅ cheerio:', typeof cheerio.load === 'function' ? 'OK' : 'ERROR');
+              console.log('🎉 All dependencies verified successfully!');
+            } catch (err) {
+              console.log('💥 Verification failed:', err.message);
+              process.exit(1);
+            }
+          "
+          echo "✅ Dependencies installation completed"
+
+      # ✅ STEP 4: Debug environment (helps troubleshoot issues)
+      - name: Debug environment
+        run: |
+          echo "🔍 Environment debugging..."
+          node --version
+          npm --version
+          pwd
+          ls -la
+          echo "📄 CSV current state:"
+          head -3 totoResult.csv || echo "CSV read failed"
+
+      # ✅ STEP 5: Run your TOTO update script (with detailed logging and error handling)
+      - name: Run update script
+        run: |
+          echo "🎯 Running TOTO update script with detailed logging..."
+          echo "📄 CSV state BEFORE script:"
+          head -3 totoResult.csv
+          echo ""
+          echo "🚀 Executing script..."
+          
+          # Run with error handling
+          if node updateTotoCSV.cjs; then
+            echo "✅ Script completed successfully"
+          else
+            SCRIPT_EXIT_CODE=$?
+            echo "⚠️ Script exited with code: $SCRIPT_EXIT_CODE"
+            echo "📋 This might be normal if no new results are available"
+          fi
+          
+          echo ""
+          echo "📄 CSV state AFTER script:"
+          head -3 totoResult.csv
+          echo "✅ Update step completed"
+
+      # ✅ STEP 6: Check if CSV file was modified
+      - name: Check for changes
+        id: verify-changed-files
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "📝 Changes detected in repository"
+            echo "📊 Git status:"
+            git status --porcelain
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "📋 No changes detected"
+          fi
+
+      # 🔍 DEBUG: Git diagnostic information
+      - name: Debug Git Status (if changes detected)
+        if: steps.verify-changed-files.outputs.changed == 'true'
+        run: |
+          echo "🔍 Git diagnostic information before commit:"
+          echo "Git version: $(git --version)"
+          echo "Current branch: $(git branch --show-current)"
+          echo "Remote repositories:"
+          git remote -v
+          echo "Repository status:"
+          git status
+          echo "Recent commits (last 3):"
+          git log --oneline -3 || echo "No commits found"
+          echo "File permissions check:"
+          ls -la totoResult.csv || echo "CSV file not found"
+
+      # ✅ STEP 7: Commit & push if the CSV has changed (Enhanced with retry logic)
+      - name: Commit and push if changed
+        if: steps.verify-changed-files.outputs.changed == 'true'
+        run: |
+          echo "🔄 Starting enhanced commit and push process..."
+          
+          # Ensure we're on main branch
+          git checkout main || echo "Already on main branch"
+          
+          # Pull latest changes to avoid conflicts
+          echo "📥 Pulling latest changes..."
+          git pull origin main --rebase || echo "⚠️ Pull/rebase had issues, continuing..."
+          
+          # Configure git user
+          echo "👤 Configuring git user..."
+          git config --local user.name "github-actions[bot]"
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          # Verify file exists and has changes
+          if [ -f "totoResult.csv" ]; then
+            echo "📄 CSV file exists, adding to git..."
+            git add totoResult.csv
+            
+            # Check if there are actually changes to commit
+            if git diff --staged --quiet; then
+              echo "📋 No staged changes found, skipping commit"
+              exit 0
+            fi
+            
+            # Commit with detailed message
+            COMMIT_MESSAGE="🎯 Auto update TOTO results: $(date +'%Y-%m-%d %H:%M:%S UTC')"
+            echo "💾 Committing with message: $COMMIT_MESSAGE"
+            git commit -m "$COMMIT_MESSAGE"
+            
+            # Push with retry mechanism
+            echo "🚀 Pushing to remote repository..."
+            RETRY_COUNT=0
+            MAX_RETRIES=5
+            
+            while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+              if git push origin main; then
+                echo "✅ Successfully pushed changes on attempt $((RETRY_COUNT + 1))"
+                echo "🎉 Commit and push completed successfully!"
+                break
+              else
+                RETRY_COUNT=$((RETRY_COUNT + 1))
+                echo "⚠️ Push failed on attempt $RETRY_COUNT/$MAX_RETRIES"
+                
+                if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                  echo "🔄 Pulling latest changes and retrying..."
+                  git pull origin main --rebase || echo "Pull failed, continuing..."
+                  echo "⏳ Waiting before retry..."
+                  sleep $((RETRY_COUNT * 3))  # Exponential backoff: 3, 6, 9, 12 seconds
+                fi
+              fi
+            done
+            
+            # Final check if all retries failed
+            if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+              echo "💥 Failed to push after $MAX_RETRIES attempts"
+              echo "🔍 Final git status:"
+              git status
+              echo "🔍 Recent commits:"
+              git log --oneline -3
+              echo "🔍 Remote status:"
+              git remote -v
+              exit 1
+            fi
+            
+          else
+            echo "❌ totoResult.csv not found!"
+            ls -la *.csv || echo "No CSV files found"
+            exit 1
+          fi
+
+      # ✅ STEP 8: Summary
+      - name: Summary
+        run: |
+          echo "🎉 TOTO update workflow completed successfully!"
+          if [ "${{ steps.verify-changed-files.outputs.changed }}" == "true" ]; then
+            echo "📊 CSV file was updated with new results"
+            echo "🔄 Website will refresh automatically"
+          else
+            echo "📋 No new results found - CSV file unchanged"
+            echo "💡 This is normal if no new TOTO draw occurred"
+          fi
+          echo "📈 Current CSV state:"
+          head -2 totoResult.csv || echo "Could not read CSV"
